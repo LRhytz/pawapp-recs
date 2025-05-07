@@ -3,7 +3,7 @@
 import admin from 'firebase-admin';
 import OpenAI from 'openai';
 
-// ————— In-memory cache (5 min TTL) —————
+// ————— In‐memory cache (5 min TTL) —————
 let cache = { itemsByType: {}, lastFetch: 0 };
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
@@ -84,14 +84,34 @@ export default async function handler(req, res) {
   console.log('📦 request for type=', type);
 
   try {
-    // 5) Fetch embeddings (with cache)
+    // 5) Load the user's explicit preferences
+    const prefSnap = await admin
+      .database()
+      .ref(`users/${uid}/preferences`)
+      .once('value');
+    const userPrefs = prefSnap.val() || {};
+    console.log('🔧 user prefs:', userPrefs);
+
+    // 6) Fetch embeddings (with cache)
     const tDB = Date.now();
     const items = await fetchItems(type);
-    console.log('⏱️ DB+parse:', Date.now() - tDB, 'ms (total)');
+    console.log('⏱️ DB+parse:', Date.now() - tDB, 'ms');
     console.log('🔢 items count:', items.length);
 
-    // 6) Generate query embedding
-    const prompt = `Recommend me 5 ${type}`;
+    // 7) Build a custom prompt from prefs
+    let prompt = `Recommend me 5 ${type}`;
+    if (type === 'pets'
+      && Array.isArray(userPrefs.pets)
+      && userPrefs.pets.length) {
+      prompt += ` (species: ${userPrefs.pets.join(', ')})`;
+    }
+    if (type === 'articles'
+      && Array.isArray(userPrefs.articles)
+      && userPrefs.articles.length) {
+      prompt += ` (topics: ${userPrefs.articles.join(', ')})`;
+    }
+
+    // 8) Generate query embedding
     const tAI = Date.now();
     console.log('⏳ calling OpenAI:', prompt);
     const embRes = await openai.embeddings.create({
@@ -102,8 +122,9 @@ export default async function handler(req, res) {
     console.log('⏱️ openai:', Date.now() - tAI, 'ms');
     console.log('✅ query embedding length=', qEmb.length);
 
-    // 7) Cosine similarity
+    // 9) Cosine similarity & top‐5
     const tSim = Date.now();
+    console.log('⏳ scoring', items.length, 'items…');
     const cosine = (a, b) => {
       let dot = 0, magA = 0, magB = 0;
       for (let i = 0; i < a.length; i++) {
@@ -113,9 +134,7 @@ export default async function handler(req, res) {
       }
       return dot / (Math.sqrt(magA) * Math.sqrt(magB) || 1e-12);
     };
-    console.log('⏳ scoring', items.length, 'items…');
 
-    // 8) Score & sort top-5
     const recommendations = items
       .map(item => ({ id: item.id, score: cosine(qEmb, item.embedding) }))
       .sort((a, b) => b.score - a.score)
